@@ -92,6 +92,8 @@ const FormControl = React.forwardRef<React.ElementRef<typeof Slot>, React.Compon
         id={formItemId}
         aria-describedby={!error ? `${formDescriptionId}` : `${formDescriptionId} ${formMessageId}`}
         aria-invalid={!!error}
+        // Pass error state to child components that support it (Input, Select, etc.)
+        {...({ error: !!error } as any)}
         {...props}
       />
     );

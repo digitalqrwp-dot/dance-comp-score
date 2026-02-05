@@ -35,18 +35,25 @@ export const ParticipantBadge: React.FC<ParticipantBadgeProps> = ({
   };
 
   const baseClasses = cn(
-    'relative flex items-center justify-center rounded-xl font-display font-bold transition-all duration-200',
-    'touch-target select-none',
+    'relative flex items-center justify-center rounded-[1.5rem] md:rounded-[2rem] font-display font-black transition-all duration-300',
+    'touch-target select-none overflow-visible group',
     sizeClasses[size],
     {
-      'cursor-pointer hover:scale-105 active:scale-95': onClick && !disabled,
-      'cursor-not-allowed opacity-50': disabled,
-      'bg-primary text-primary-foreground shadow-medium': !isSelected && !position,
-      'bg-success text-success-foreground shadow-lg ring-4 ring-success/30': isSelected && !position,
-      'bg-gradient-to-br from-gold to-gold-dark text-navy-dark shadow-lg': isFinalist && !position,
+      'cursor-pointer hover:scale-105 active:scale-95 hover:shadow-xl': onClick && !disabled,
+      'cursor-not-allowed opacity-30 grayscale': disabled,
+
+      // Stato Default (Navy)
+      'bg-navy text-white shadow-lg border border-white/5': !isSelected && !position && !isFinalist,
+
+      // Stato Selezione (Gold Glow)
+      'bg-gold text-navy shadow-gold-glow border-2 border-white/20 scale-105': isSelected && !position,
+
+      // Stato Finalista
+      'bg-gradient-to-br from-gold via-gold to-gold-dark text-navy shadow-xl': isFinalist && !position,
     },
     position && positionColors[position],
-    !position && !isSelected && !isFinalist && 'bg-primary text-primary-foreground shadow-soft'
+    // Animazione di ingresso pulsata se selezionato
+    isSelected && 'animate-pulse-soft'
   );
 
   return (
@@ -56,23 +63,29 @@ export const ParticipantBadge: React.FC<ParticipantBadgeProps> = ({
       className={baseClasses}
       type="button"
     >
-      <span className="relative z-10">{number}</span>
+      {/* Glossy Effect overlay */}
+      <div className="absolute inset-0 bg-gradient-to-tr from-white/10 to-transparent pointer-events-none rounded-[inherit]" />
+
+      <span className="relative z-10 tracking-tighter tabular-nums drop-shadow-sm">{number}</span>
+
       {position && (
-        <span className="absolute -top-2 -right-2 w-7 h-7 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-xs font-bold shadow-md">
+        <span className="absolute -top-3 -right-3 w-8 h-8 md:w-10 md:h-10 bg-navy text-white rounded-2xl flex items-center justify-center text-xs md:text-sm font-black shadow-2xl border-2 border-white/10 animate-in zoom-in duration-300">
           {position}°
         </span>
       )}
+
       {name && size === 'lg' && (
-        <span className="absolute -bottom-6 left-0 right-0 text-xs text-center text-muted-foreground truncate font-sans font-normal">
+        <span className="absolute -bottom-7 left-0 right-0 text-[9px] font-black uppercase tracking-widest text-navy/40 truncate px-1">
           {name}
         </span>
       )}
+
       {isSelected && !position && (
-        <span className="absolute -top-1 -right-1 w-5 h-5 bg-success text-success-foreground rounded-full flex items-center justify-center">
-          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+        <div className="absolute -top-2 -right-2 w-7 h-7 bg-success text-white rounded-2xl flex items-center justify-center shadow-lg border-2 border-white/20 animate-in zoom-in duration-300">
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={4} d="M5 13l4 4L19 7" />
           </svg>
-        </span>
+        </div>
       )}
     </button>
   );

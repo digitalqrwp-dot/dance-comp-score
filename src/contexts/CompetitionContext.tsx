@@ -1,410 +1,240 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode } from 'react';
-import type { 
-  Competition, 
-  Event, 
-  Judge, 
-  Participant, 
-  JudgeSelection, 
-  FinalRanking,
-  AgeCategory,
-  CompetitionClass,
-  DanceStyle,
-  Dance
-} from '@/types/competition';
-import { 
-  generateId, 
-  generateHeats, 
-  calculateFinalists, 
-  calculateSkatingResults 
-} from '@/utils/competition';
+/* ⚠️ ARCHITETTURA NON CONVENZIONALE - LEGGERE [src/contexts/README.md] PRIMA DI MODIFICARE ⚠️ */
+import React, { createContext, useContext, useState, useCallback, ReactNode, useMemo, useEffect } from 'react';
+import { supabase } from '@/lib/supabase';
+import { useEvent } from './EventContext';
+import { useJudge } from './JudgeContext';
+import { Database } from '@/types/database';
+import { judgmentService } from '@/services/judgmentService';
+import { Performance } from '@/types/competition';
+
+import { Competition, PerformanceWithMembers, Athlete } from '@/types/competition';
+export type Round = Database['public']['Tables']['competition_rounds']['Row'];
 
 interface CompetitionContextType {
-  // State
-  currentEvent: Event | null;
   activeCompetition: Competition | null;
-  currentJudge: Judge | null;
-  
-  // Event actions
-  createEvent: (name: string, date: Date, location: string) => void;
-  
-  // Competition actions
-  createCompetition: (
-    name: string,
-    ageCategory: AgeCategory,
-    competitionClass: CompetitionClass,
-    style: DanceStyle,
-    dances: Dance[]
-  ) => void;
   setActiveCompetition: (competitionId: string | null) => void;
-  
-  // Participant actions
-  addParticipant: (competitionId: string, name: string, surname: string, club?: string) => void;
-  removeParticipant: (competitionId: string, participantId: string) => void;
-  
-  // Phase management
-  startHeats: (competitionId: string) => void;
-  advanceToNextHeat: (competitionId: string) => void;
-  startFinal: (competitionId: string) => void;
-  completeCompetition: (competitionId: string) => void;
-  
-  // Judge actions
-  addJudge: (name: string, code: string) => void;
-  setCurrentJudge: (judgeId: string | null) => void;
-  
-  // Selection actions (for judges during heats/semifinal)
-  submitSelection: (competitionId: string, selectedParticipantIds: string[]) => void;
-  
-  // Final ranking actions
-  submitFinalRanking: (competitionId: string, rankings: Record<string, number>) => void;
-  
-  // Utility
-  getCompetitionById: (id: string) => Competition | undefined;
-  getParticipantsByIds: (competition: Competition, ids: string[]) => Participant[];
+  performances: PerformanceWithMembers[];
+  activeRound: Round | null;
+  disciplineParameters: { id: string, name: string }[];
+  loading: boolean;
+  submitSelection: (competitionId: string, selectedParticipantIds: string[]) => Promise<void>;
+  submitFinalRanking: (competitionId: string, rankings: Record<string, number>) => Promise<void>;
+  submitParameterScores: (competitionId: string, performanceId: string, scores: Record<string, number>) => Promise<void>;
 }
 
 const CompetitionContext = createContext<CompetitionContextType | undefined>(undefined);
 
 export const useCompetition = () => {
   const context = useContext(CompetitionContext);
-  if (!context) {
-    throw new Error('useCompetition must be used within a CompetitionProvider');
-  }
+  if (!context) throw new Error('useCompetition must be used within a CompetitionProvider');
   return context;
 };
 
-interface CompetitionProviderProps {
-  children: ReactNode;
-}
-
-export const CompetitionProvider: React.FC<CompetitionProviderProps> = ({ children }) => {
-  const [currentEvent, setCurrentEvent] = useState<Event | null>(null);
+export const CompetitionProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const { currentEvent, competitions } = useEvent();
+  const { judgeSession } = useJudge();
   const [activeCompetitionId, setActiveCompetitionId] = useState<string | null>(null);
-  const [currentJudge, setCurrentJudgeState] = useState<Judge | null>(null);
+  const [performances, setPerformances] = useState<PerformanceWithMembers[]>([]);
+  const [activeRound, setActiveRound] = useState<Round | null>(null);
+  const [disciplineParameters, setDisciplineParameters] = useState<{ id: string, name: string }[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  const createEvent = useCallback((name: string, date: Date, location: string) => {
-    const newEvent: Event = {
-      id: generateId(),
-      name,
-      date,
-      location,
-      competitions: [],
-      judges: [],
-    };
-    setCurrentEvent(newEvent);
-  }, []);
+  const activeCompetition = useMemo(() =>
+    competitions.find(c => c.id === activeCompetitionId) || null
+    , [competitions, activeCompetitionId]);
 
-  const createCompetition = useCallback((
-    name: string,
-    ageCategory: AgeCategory,
-    competitionClass: CompetitionClass,
-    style: DanceStyle,
-    dances: Dance[]
-  ) => {
-    if (!currentEvent) return;
+  const setActiveCompetition = useCallback((id: string | null) => setActiveCompetitionId(id), []);
 
-    const newCompetition: Competition = {
-      id: generateId(),
-      name,
-      ageCategory,
-      competitionClass,
-      style,
-      dances,
-      participants: [],
-      heats: [],
-      currentPhase: 'registration',
-      currentHeatIndex: 0,
-      judgeSelections: [],
-      finalRankings: [],
-      finalists: [],
-      results: [],
-      createdAt: new Date(),
-    };
-
-    setCurrentEvent(prev => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        competitions: [...prev.competitions, newCompetition],
-      };
-    });
-  }, [currentEvent]);
-
-  const setActiveCompetition = useCallback((competitionId: string | null) => {
-    setActiveCompetitionId(competitionId);
-  }, []);
-
-  const activeCompetition = currentEvent?.competitions.find(c => c.id === activeCompetitionId) || null;
-
-  const addParticipant = useCallback((competitionId: string, name: string, surname: string, club?: string) => {
-    setCurrentEvent(prev => {
-      if (!prev) return prev;
-      
-      const competitionIndex = prev.competitions.findIndex(c => c.id === competitionId);
-      if (competitionIndex === -1) return prev;
-
-      const competition = prev.competitions[competitionIndex];
-      const newNumber = competition.participants.length + 1;
-      
-      const newParticipant: Participant = {
-        id: generateId(),
-        competitionNumber: newNumber,
-        name,
-        surname,
-        club,
-      };
-
-      const updatedCompetitions = [...prev.competitions];
-      updatedCompetitions[competitionIndex] = {
-        ...competition,
-        participants: [...competition.participants, newParticipant],
-      };
-
-      return { ...prev, competitions: updatedCompetitions };
-    });
-  }, []);
-
-  const removeParticipant = useCallback((competitionId: string, participantId: string) => {
-    setCurrentEvent(prev => {
-      if (!prev) return prev;
-      
-      const competitionIndex = prev.competitions.findIndex(c => c.id === competitionId);
-      if (competitionIndex === -1) return prev;
-
-      const competition = prev.competitions[competitionIndex];
-      const updatedParticipants = competition.participants
-        .filter(p => p.id !== participantId)
-        .map((p, index) => ({ ...p, competitionNumber: index + 1 }));
-
-      const updatedCompetitions = [...prev.competitions];
-      updatedCompetitions[competitionIndex] = {
-        ...competition,
-        participants: updatedParticipants,
-      };
-
-      return { ...prev, competitions: updatedCompetitions };
-    });
-  }, []);
-
-  const startHeats = useCallback((competitionId: string) => {
-    setCurrentEvent(prev => {
-      if (!prev) return prev;
-      
-      const competitionIndex = prev.competitions.findIndex(c => c.id === competitionId);
-      if (competitionIndex === -1) return prev;
-
-      const competition = prev.competitions[competitionIndex];
-      const heats = generateHeats(competition.participants);
-
-      const updatedCompetitions = [...prev.competitions];
-      updatedCompetitions[competitionIndex] = {
-        ...competition,
-        heats,
-        currentPhase: 'heats',
-        currentHeatIndex: 0,
-        judgeSelections: [],
-      };
-
-      return { ...prev, competitions: updatedCompetitions };
-    });
-  }, []);
-
-  const advanceToNextHeat = useCallback((competitionId: string) => {
-    setCurrentEvent(prev => {
-      if (!prev) return prev;
-      
-      const competitionIndex = prev.competitions.findIndex(c => c.id === competitionId);
-      if (competitionIndex === -1) return prev;
-
-      const competition = prev.competitions[competitionIndex];
-      const nextHeatIndex = competition.currentHeatIndex + 1;
-
-      // Mark current heat as completed
-      const updatedHeats = [...competition.heats];
-      if (updatedHeats[competition.currentHeatIndex]) {
-        updatedHeats[competition.currentHeatIndex] = {
-          ...updatedHeats[competition.currentHeatIndex],
-          isCompleted: true,
-        };
-      }
-
-      const updatedCompetitions = [...prev.competitions];
-      updatedCompetitions[competitionIndex] = {
-        ...competition,
-        heats: updatedHeats,
-        currentHeatIndex: nextHeatIndex,
-        currentPhase: nextHeatIndex >= competition.heats.length ? 'semifinal' : 'heats',
-      };
-
-      return { ...prev, competitions: updatedCompetitions };
-    });
-  }, []);
-
-  const startFinal = useCallback((competitionId: string) => {
-    setCurrentEvent(prev => {
-      if (!prev) return prev;
-      
-      const competitionIndex = prev.competitions.findIndex(c => c.id === competitionId);
-      if (competitionIndex === -1) return prev;
-
-      const competition = prev.competitions[competitionIndex];
-      const finalists = calculateFinalists(competition);
-
-      const updatedCompetitions = [...prev.competitions];
-      updatedCompetitions[competitionIndex] = {
-        ...competition,
-        finalists,
-        currentPhase: 'final',
-        finalRankings: [],
-      };
-
-      return { ...prev, competitions: updatedCompetitions };
-    });
-  }, []);
-
-  const completeCompetition = useCallback((competitionId: string) => {
-    setCurrentEvent(prev => {
-      if (!prev) return prev;
-      
-      const competitionIndex = prev.competitions.findIndex(c => c.id === competitionId);
-      if (competitionIndex === -1) return prev;
-
-      const competition = prev.competitions[competitionIndex];
-      const results = calculateSkatingResults(competition.finalRankings, competition.finalists);
-
-      const updatedCompetitions = [...prev.competitions];
-      updatedCompetitions[competitionIndex] = {
-        ...competition,
-        results,
-        currentPhase: 'completed',
-      };
-
-      return { ...prev, competitions: updatedCompetitions };
-    });
-  }, []);
-
-  const addJudge = useCallback((name: string, code: string) => {
-    setCurrentEvent(prev => {
-      if (!prev) return prev;
-      
-      const newJudge: Judge = {
-        id: generateId(),
-        name,
-        code,
-        isActive: true,
-      };
-
-      return {
-        ...prev,
-        judges: [...prev.judges, newJudge],
-      };
-    });
-  }, []);
-
-  const setCurrentJudge = useCallback((judgeId: string | null) => {
-    if (!judgeId) {
-      setCurrentJudgeState(null);
+  // Caricamento dati della gara selezionata
+  React.useEffect(() => {
+    if (!activeCompetitionId) {
+      setPerformances([]);
+      setActiveRound(null);
       return;
     }
-    const judge = currentEvent?.judges.find(j => j.id === judgeId) || null;
-    setCurrentJudgeState(judge);
-  }, [currentEvent]);
 
-  const submitSelection = useCallback((competitionId: string, selectedParticipantIds: string[]) => {
-    if (!currentJudge) return;
+    const loadData = async () => {
+      setLoading(true);
+      try {
+        // 1. Carica Performance
+        const { data: perfs, error: perfErr } = await supabase
+          .from('performances')
+          .select(`
+            *,
+            performance_members (
+              athletes (*)
+            )
+          `)
+          .eq('competition_id', activeCompetitionId)
+          .order('bib_number', { ascending: true });
 
-    setCurrentEvent(prev => {
-      if (!prev) return prev;
-      
-      const competitionIndex = prev.competitions.findIndex(c => c.id === competitionId);
-      if (competitionIndex === -1) return prev;
+        if (perfErr) throw perfErr;
 
-      const competition = prev.competitions[competitionIndex];
-      
-      // Remove previous selection from same judge for same heat
-      const filteredSelections = competition.judgeSelections.filter(
-        s => s.judgeId !== currentJudge.id
-      );
+        const mappedPerfs = perfs.map(p => {
+          const perf = p as unknown as PerformanceWithMembers;
+          return {
+            ...perf,
+            members: (perf.performance_members)?.map(pm => pm.athletes).filter((a): a is Athlete => !!a) || []
+          };
+        });
 
-      const newSelection: JudgeSelection = {
-        judgeId: currentJudge.id,
-        judgeName: currentJudge.name,
-        selectedParticipants: selectedParticipantIds,
-        timestamp: new Date(),
-      };
+        setPerformances(mappedPerfs);
 
-      const updatedCompetitions = [...prev.competitions];
-      updatedCompetitions[competitionIndex] = {
-        ...competition,
-        judgeSelections: [...filteredSelections, newSelection],
-      };
+        // 2. Carica Round Attivo
+        const { data: rounds, error: roundErr } = await supabase
+          .from('competition_rounds')
+          .select('*')
+          .eq('competition_id', activeCompetitionId)
+          .eq('status', 'open')
+          .order('order_index', { ascending: false })
+          .limit(1);
 
-      return { ...prev, competitions: updatedCompetitions };
-    });
-  }, [currentJudge]);
+        if (roundErr) throw roundErr;
 
-  const submitFinalRanking = useCallback((competitionId: string, rankings: Record<string, number>) => {
-    if (!currentJudge) return;
+        if (rounds && rounds.length > 0) {
+          setActiveRound(rounds[0]);
+        } else {
+          setActiveRound(null);
+        }
 
-    setCurrentEvent(prev => {
-      if (!prev) return prev;
-      
-      const competitionIndex = prev.competitions.findIndex(c => c.id === competitionId);
-      if (competitionIndex === -1) return prev;
+        // 3. Carica Parametri se Sistema B
+        if (activeCompetition?.disciplines?.scoring_type === 'parameters') {
+          const { data: params, error: paramErr } = await supabase
+            .from('discipline_parameters')
+            .select(`
+              parameter_id,
+              scoring_parameters (id, name)
+            `)
+            .eq('discipline_id', activeCompetition.discipline_id || '');
 
-      const competition = prev.competitions[competitionIndex];
-      
-      // Remove previous ranking from same judge
-      const filteredRankings = competition.finalRankings.filter(
-        r => r.judgeId !== currentJudge.id
-      );
+          if (!paramErr && params) {
+            setDisciplineParameters(params.map((p: any) => ({
+              id: p.scoring_parameters.id,
+              name: p.scoring_parameters.name
+            })));
+          }
+        } else {
+          setDisciplineParameters([]);
+        }
+      } catch (err) {
+        console.error('[CompetitionContext] Errore caricamento dati:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
 
-      const newRanking: FinalRanking = {
-        judgeId: currentJudge.id,
-        judgeName: currentJudge.name,
+    loadData();
+  }, [activeCompetitionId, activeCompetition?.disciplines?.scoring_type, activeCompetition?.discipline_id]); // Aggiunto scoring_type e discipline_id come DIP per ricaricare se cambia gara
+
+  // 4. Sottoscrizione Real-time per Giudizi (per aggiornamento Ranking Live)
+  React.useEffect(() => {
+    if (!activeRound) return;
+
+    const channelSkating = supabase
+      .channel(`judgments-skating-${activeRound.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'judgments_skating',
+          filter: `round_id=eq.${activeRound.id}`
+        },
+        () => {
+          console.log('[Realtime] Cambio rilevato in judgments_skating');
+          // Qui potremmo emettere un evento o ricaricare i calcoli rpc
+        }
+      )
+      .subscribe();
+
+    const channelParams = supabase
+      .channel(`judgments-params-${activeRound.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'judgments_parameters',
+          filter: `round_id=eq.${activeRound.id}`
+        },
+        () => {
+          console.log('[Realtime] Cambio rilevato in judgments_parameters');
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channelSkating);
+      supabase.removeChannel(channelParams);
+    };
+  }, [activeRound]);
+
+  const submitSelection = useCallback(async (compId: string, selectedIds: string[]) => {
+    if (!judgeSession || !activeRound) return;
+
+    try {
+      await judgmentService.submitSelection({
+        roundId: activeRound.id,
+        judgeId: judgeSession.judgeId,
+        judgeCode: judgeSession.accessCode,
+        performanceIds: selectedIds,
+        judgeName: judgeSession.judgeName,
+        judgeSurname: judgeSession.judgeSurname
+      });
+      console.log('[Competition] Selezione inviata con successo');
+    } catch (err) {
+      console.error('[Competition] Errore invio selezione:', err);
+    }
+  }, [judgeSession, activeRound]);
+
+  const submitFinalRanking = useCallback(async (compId: string, rankings: Record<string, number>) => {
+    if (!judgeSession || !activeRound) return;
+
+    try {
+      await judgmentService.submitFinalRanking({
+        roundId: activeRound.id,
+        judgeId: judgeSession.judgeId,
+        judgeCode: judgeSession.accessCode,
         rankings,
-      };
+        judgeName: judgeSession.judgeName,
+        judgeSurname: judgeSession.judgeSurname
+      });
+      console.log('[Competition] Ranking finale inviato con successo');
+    } catch (err) {
+      console.error('[Competition] Errore invio ranking:', err);
+    }
+  }, [judgeSession, activeRound]);
 
-      const updatedCompetitions = [...prev.competitions];
-      updatedCompetitions[competitionIndex] = {
-        ...competition,
-        finalRankings: [...filteredRankings, newRanking],
-      };
+  const submitParameterScores = useCallback(async (compId: string, perfId: string, scores: Record<string, number>) => {
+    if (!judgeSession || !activeRound) return;
 
-      return { ...prev, competitions: updatedCompetitions };
-    });
-  }, [currentJudge]);
-
-  const getCompetitionById = useCallback((id: string) => {
-    return currentEvent?.competitions.find(c => c.id === id);
-  }, [currentEvent]);
-
-  const getParticipantsByIds = useCallback((competition: Competition, ids: string[]) => {
-    return competition.participants.filter(p => ids.includes(p.id));
-  }, []);
-
-  const value: CompetitionContextType = {
-    currentEvent,
-    activeCompetition,
-    currentJudge,
-    createEvent,
-    createCompetition,
-    setActiveCompetition,
-    addParticipant,
-    removeParticipant,
-    startHeats,
-    advanceToNextHeat,
-    startFinal,
-    completeCompetition,
-    addJudge,
-    setCurrentJudge,
-    submitSelection,
-    submitFinalRanking,
-    getCompetitionById,
-    getParticipantsByIds,
-  };
+    try {
+      await judgmentService.submitParameterScores({
+        roundId: activeRound.id,
+        performanceId: perfId,
+        judgeCode: judgeSession.accessCode,
+        judgeName: judgeSession.judgeName,
+        judgeSurname: judgeSession.judgeSurname,
+        scores
+      });
+      console.log('[Competition] Voti parametri inviati con successo');
+    } catch (err) {
+      console.error('[Competition] Errore invio parametri:', err);
+    }
+  }, [judgeSession, activeRound]);
 
   return (
-    <CompetitionContext.Provider value={value}>
+    <CompetitionContext.Provider value={{
+      activeCompetition,
+      setActiveCompetition,
+      performances,
+      activeRound,
+      disciplineParameters,
+      loading,
+      submitSelection,
+      submitFinalRanking,
+      submitParameterScores,
+    }}>
       {children}
     </CompetitionContext.Provider>
   );
